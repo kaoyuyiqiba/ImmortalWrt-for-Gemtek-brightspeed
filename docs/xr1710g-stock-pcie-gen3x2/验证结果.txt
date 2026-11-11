@@ -1,0 +1,13 @@
+XR1710G 原厂 PCIe 重建代码：离线模拟验证
+
+环境：WSL XR1710G-Build；C11，-Wall -Wextra -Werror -Wpedantic，UBSan。
+退出码：0。三组用例均通过，未报告未定义行为。
+
+1. 公开原厂复位分支：四次双 lane 校准、第 7 个粗调档、两组 MAC、PERST 和链路就绪。
+2. 工程版复位分支：最终采样全未锁定时正确计数；LINKUP 超时后保留 LTSSM 值。
+3. 拒绝超出范围的模式；共享 PHY 初始化失败时不释放 PERST。
+
+以下为测试程序原始输出：
+PASS: retail x2 sequence, 4 calibration passes, coarse bin 7, both MACs, PERST and link-up
+PASS: engineering reset variant, per-sample unlock reporting and LINKUP timeout
+PASS: mode/package exclusions and pre-calibration failure keep link held in reset
