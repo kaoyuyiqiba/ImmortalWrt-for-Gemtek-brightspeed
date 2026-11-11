@@ -34,6 +34,13 @@ boot()
 	gemtek,w1700k-ubi|\
 	gemtek,xr1710g|\
 	gemtek,xr1710g-ubi)
+		# LuCI owns the persisted mode and curve when installed. Do not
+		# overwrite its setup later in the same START=99 boot sequence.
+		if [ -x /etc/init.d/fan ] && [ -s /etc/config/fan ]; then
+			/etc/init.d/fan start
+			return $?
+		fi
+
 		hwmon=$(find_nct7802) || {
 			logger -t airoha_fan "NCT7802 not found; fan setup skipped"
 			return 1

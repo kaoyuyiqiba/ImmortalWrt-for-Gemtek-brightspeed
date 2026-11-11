@@ -1,0 +1,79 @@
+Subject: fan: seed automatic mode from validated live temperatures
+
+--- a/luci-app-airoha-fancontrol/root/etc/init.d/fan
++++ b/luci-app-airoha-fancontrol/root/etc/init.d/fan
+@@ -31,7 +31,7 @@
+ 	[ "${#1}" -le 3 ] && [ "$1" -le "$2" ]
+ }
+ 
+-apply_curve() {
++validate_curve() {
+ 	local preset="$1" temp pwm prev_temp=-1 prev_pwm=-1 i
+ 	case "$preset" in quiet|balanced|performance|custom) ;; *) return 1;; esac
+ 	# Validate the complete curve before changing any table entry.
+@@ -45,6 +45,10 @@
+ 			prev_pwm=$pwm
+ 		fi
+ 	done
++}
++
++apply_curve() {
++	local preset="$1" temp pwm i
+ 	for i in 1 2 3 4 5; do
+ 		temp=$(uci -q get "fan.${preset}.point${i}_temp")
+ 		fan_write "pwm1_auto_point${i}_temp" "$((temp * 1000))" || return 1
+@@ -55,8 +59,34 @@
+ 	done
+ }
+ 
++# Seed SmartFan at a conservative upper curve point, rather than 255 on
++# every reload. NCT7802's default falling ramp is about one PWM count/s:
++# repeatedly seeding 255 makes a healthy auto mode look stuck at full speed.
++# This board's existing mapping uses RTD1; include local temperature too.
++# An invalid active sensor keeps the established full-speed fail-safe.
++auto_seed() {
++	local preset="$1" temp local_temp fault threshold pwm i
++	fault=$(cat "$HWMON/temp1_fault" 2>/dev/null) || return 1
++	[ "$fault" = 0 ] || return 1
++	temp=$(cat "$HWMON/temp1_input" 2>/dev/null) || return 1
++	local_temp=$(cat "$HWMON/temp4_input" 2>/dev/null) || return 1
++	case "$temp:$local_temp" in *[!0-9:]*|:*|*:) return 1;; esac
++	[ "${#temp}" -le 6 ] && [ "${#local_temp}" -le 6 ] || return 1
++	[ "$temp" -le 127000 ] && [ "$local_temp" -le 127000 ] || return 1
++	[ "$local_temp" -le "$temp" ] || temp=$local_temp
++	for i in 1 2 3 4; do
++		threshold=$(uci -q get "fan.${preset}.point${i}_temp")
++		if [ "$temp" -le "$((threshold * 1000))" ]; then
++			pwm=$(uci -q get "fan.${preset}.point${i}_pwm")
++			echo "$pwm"
++			return
++		fi
++	done
++	echo 255
++}
++
+ apply_settings() {
+-	local mode preset manual_pwm
++	local mode preset manual_pwm seed
+ 	HWMON=$(find_nct7802) || {
+ 		logger -t fan "NCT7802 not found; no hwmon fallback used"
+ 		return 1
+@@ -65,13 +95,15 @@
+ 	preset=$(uci -q get fan.settings.curve_preset)
+ 	manual_pwm=$(uci -q get fan.settings.manual_pwm)
+ 
+-	fan_write pwm1_enable 1 && fan_write pwm1 255 || { fan_failsafe; return 1; }
+ 	case "$mode" in
+ 		manual)
+-			valid_uint "$manual_pwm" 255 && fan_write pwm1 "$manual_pwm" || { fan_failsafe; return 1; }
++			valid_uint "$manual_pwm" 255 && fan_write pwm1_enable 1 && fan_write pwm1 "$manual_pwm" || { fan_failsafe; return 1; }
+ 			;;
+ 		auto)
+-			apply_curve "$preset" && fan_write pwm1_enable 2 || { fan_failsafe; return 1; }
++			validate_curve "$preset" || { fan_failsafe; return 1; }
++			seed=$(auto_seed "$preset") || { fan_failsafe; return 1; }
++			fan_write pwm1_enable 1 && fan_write pwm1 "$seed" &&
++				apply_curve "$preset" && fan_write pwm1_enable 2 || { fan_failsafe; return 1; }
+ 			;;
+ 		*) fan_failsafe; return 1;;
+ 	esac
