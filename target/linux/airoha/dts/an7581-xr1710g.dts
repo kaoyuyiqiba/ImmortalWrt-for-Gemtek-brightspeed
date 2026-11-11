@@ -239,6 +239,10 @@
 	airoha,pcie-analog-init;
 };
 
+&pciephy {
+	gemtek,xr1710g-retail-rx-kflow;
+};
+
 &pcie0 {
 	status = "okay";
 
