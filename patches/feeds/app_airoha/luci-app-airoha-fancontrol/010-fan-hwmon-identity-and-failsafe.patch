@@ -1,0 +1,99 @@
+Subject: fan: validate NCT7802 identity and retain cooling on setup failure
+
+Never write to an unrelated hwmon5 when the controller cannot be found.
+Validate complete curves and every sysfs write; request full PWM while
+reconfiguring and on error. Keep the existing duty curve; it is not the
+retail multi-source RPM-based fan_manager policy.
+---
+--- a/luci-app-airoha-fancontrol/root/etc/init.d/fan
++++ b/luci-app-airoha-fancontrol/root/etc/init.d/fan
+@@ -10,45 +10,70 @@
+ 			return
+ 		fi
+ 	done
+-	echo "/sys/class/hwmon/hwmon5"  # fallback
++	return 1
+ }
+ 
+-HWMON=$(find_nct7802)
++HWMON=
++
++fan_write() {
++	printf '%s\n' "$2" > "$HWMON/$1"
++}
++
++fan_failsafe() {
++	fan_write pwm1_enable 1
++	fan_write pwm1 255
++	logger -t fan "Invalid fan configuration or hwmon write failed; requested full speed"
++	return 1
++}
++
++valid_uint() {
++	case "$1" in ''|*[!0-9]*|0[0-9]*) return 1;; esac
++	[ "${#1}" -le 3 ] && [ "$1" -le "$2" ]
++}
+ 
+ apply_curve() {
+-	local preset="$1"
+-	local temp pwm
++	local preset="$1" temp pwm prev_temp=-1 prev_pwm=-1 i
++	case "$preset" in quiet|balanced|performance|custom) ;; *) return 1;; esac
++	# Validate the complete curve before changing any table entry.
+ 	for i in 1 2 3 4 5; do
+-		temp=$(uci -q get fan.${preset}.point${i}_temp)
+-		pwm=$(uci -q get fan.${preset}.point${i}_pwm)
+-		if [ -n "$temp" ]; then
+-			echo $((temp * 1000)) > ${HWMON}/pwm1_auto_point${i}_temp 2>/dev/null
++		temp=$(uci -q get "fan.${preset}.point${i}_temp")
++		valid_uint "$temp" 127 && [ "$temp" -gt "$prev_temp" ] || return 1
++		prev_temp=$temp
++		if [ "$i" -lt 5 ]; then
++			pwm=$(uci -q get "fan.${preset}.point${i}_pwm")
++			valid_uint "$pwm" 255 && [ "$pwm" -ge "$prev_pwm" ] || return 1
++			prev_pwm=$pwm
+ 		fi
+-		if [ -n "$pwm" ] && [ "$i" -lt 5 ]; then
+-			echo "$pwm" > ${HWMON}/pwm1_auto_point${i}_pwm 2>/dev/null
++	done
++	for i in 1 2 3 4 5; do
++		temp=$(uci -q get "fan.${preset}.point${i}_temp")
++		fan_write "pwm1_auto_point${i}_temp" "$((temp * 1000))" || return 1
++		if [ "$i" -lt 5 ]; then
++			pwm=$(uci -q get "fan.${preset}.point${i}_pwm")
++			fan_write "pwm1_auto_point${i}_pwm" "$pwm" || return 1
+ 		fi
+ 	done
+ }
+ 
+ apply_settings() {
+ 	local mode preset manual_pwm
+-	[ ! -d "$HWMON" ] && return 1
+-
++	HWMON=$(find_nct7802) || {
++		logger -t fan "NCT7802 not found; no hwmon fallback used"
++		return 1
++	}
+ 	mode=$(uci -q get fan.settings.mode)
+ 	preset=$(uci -q get fan.settings.curve_preset)
+ 	manual_pwm=$(uci -q get fan.settings.manual_pwm)
+ 
+-	# Disable auto mode temporarily to write settings
+-	echo 1 > ${HWMON}/pwm1_enable 2>/dev/null
+-
++	fan_write pwm1_enable 1 && fan_write pwm1 255 || { fan_failsafe; return 1; }
+ 	case "$mode" in
+ 		manual)
+-			[ -n "$manual_pwm" ] && echo "$manual_pwm" > ${HWMON}/pwm1 2>/dev/null
++			valid_uint "$manual_pwm" 255 && fan_write pwm1 "$manual_pwm" || { fan_failsafe; return 1; }
+ 			;;
+-		auto|*)
+-			[ -n "$preset" ] && apply_curve "$preset"
+-			echo 2 > ${HWMON}/pwm1_enable 2>/dev/null
++		auto)
++			apply_curve "$preset" && fan_write pwm1_enable 2 || { fan_failsafe; return 1; }
+ 			;;
++		*) fan_failsafe; return 1;;
+ 	esac
+ }
+ 
